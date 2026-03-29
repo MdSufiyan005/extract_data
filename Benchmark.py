@@ -564,17 +564,12 @@ def measure_kl_divergence(candidate_model: Path, base_model: Path, device_key: s
 # ══════════════════════════════════════════════════════════════════════════════
 # BENCHMARK (llama-bench)
 # ══════════════════════════════════════════════════════════════════════════════
-
 def benchmark_model(model_path: Path, device_key: str) -> dict:
     bench_bin = resolve_bin(LLAMA_BENCH, "llama-bench")
     if not bench_bin:
         return {"success": False, "error_msg": "llama-bench not found"}
 
     device = DEVICES[device_key]
-    process = psutil.Process()
-
-    ram_before = process.memory_info().rss / (1024 ** 2)
-    load_start = time.perf_counter()
 
     cmd = [
         bench_bin,
@@ -591,41 +586,90 @@ def benchmark_model(model_path: Path, device_key: str) -> dict:
     logger.info(f"Benchmarking: {model_path.name}")
     logger.info("Command: " + " ".join(cmd))
 
+    # ── Memory monitoring ──────────────────────────────────────────────
+    peak_ram_mb_holder = [0.0]
+    stop_event = threading.Event()
+
+    def _monitor(pid: int) -> None:
+        try:
+            child = psutil.Process(pid)
+            while not stop_event.is_set():
+                try:
+                    rss_mb = child.memory_info().rss / (1024 ** 2)
+                    if rss_mb > peak_ram_mb_holder[0]:
+                        peak_ram_mb_holder[0] = rss_mb
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    break
+                time.sleep(0.15)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    # ── Launch ────────────────────────────────────────────────────────
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as e:
+        return {"success": False, "error_msg": str(e)}
+
+    wall_start = time.perf_counter()   # ← start wall clock AFTER Popen succeeds
+
+    monitor_thread = threading.Thread(target=_monitor, args=(proc.pid,), daemon=True)
+    monitor_thread.start()
+
+    try:
+        stdout, stderr = proc.communicate(timeout=900)
     except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate()
+        stop_event.set()
+        monitor_thread.join()
         return {"success": False, "error_msg": "timeout"}
+    finally:
+        stop_event.set()
+        monitor_thread.join()
 
-    load_time_s = round(time.perf_counter() - load_start, 2)
-    peak_ram_mb = round(process.memory_info().rss / (1024 ** 2), 1)
+    total_wall_s = time.perf_counter() - wall_start
+    peak_ram_mb  = round(peak_ram_mb_holder[0], 1)
 
+    # ── Error handling ────────────────────────────────────────────────
     if proc.returncode != 0:
-        stderr_lower = (proc.stderr or "").lower()
+        stderr_lower = (stderr or "").lower()
         oom = any(k in stderr_lower for k in ["oom", "out of memory", "killed"])
         return {
             "success": False,
             "peak_ram_mb": peak_ram_mb,
-            "load_time_s": load_time_s,
+            "load_time_s": None,
             "oom": oom,
-            "error_msg": (proc.stderr or "")[:500],
+            "error_msg": (stderr or "")[:500],
         }
 
+    # ── Parse JSON ────────────────────────────────────────────────────
+    # This build emits pure JSON — find the start of the array/object
+    # in case any stray text precedes it
     try:
-        data = json.loads(proc.stdout)
+        json_start = stdout.find("[")
+        if json_start == -1:
+            json_start = stdout.find("{")
+        data = json.loads(stdout[json_start:] if json_start != -1 else stdout)
     except json.JSONDecodeError:
         logger.warning("llama-bench JSON parse failed")
-        logger.warning(f"Raw stdout:\n{proc.stdout[:1000]}")
+        logger.warning(f"Raw stdout:\n{stdout[:1000]}")
         return {"success": False, "error_msg": "JSON parse failed"}
 
+    # ── Extract metrics ───────────────────────────────────────────────
     prompt_tps = None
-    gen_tps = None
-    latency = None
+    gen_tps    = None
+    latency    = None
 
     entries = data if isinstance(data, list) else [data]
     for entry in entries:
         n_prompt = entry.get("n_prompt", 0)
-        n_gen = entry.get("n_gen", 0)
-        avg_ts = entry.get("avg_ts", 0)
+        n_gen    = entry.get("n_gen", 0)
+        avg_ts   = entry.get("avg_ts", 0)
 
         if n_prompt > 0 and n_gen == 0:
             try:
@@ -639,6 +683,26 @@ def benchmark_model(model_path: Path, device_key: str) -> dict:
                 gen_tps = float(avg_ts)
             except Exception:
                 pass
+
+    # ── Load time = wall time − known eval time ───────────────────────
+    # total_wall = model_load + prompt_eval + generation
+    # We know prompt and gen duration from tps, so we can subtract them out.
+    load_time_s = None
+    try:
+        prompt_eval_s = (EVAL_TOKENS_PROMPT / prompt_tps) if prompt_tps else 0.0
+        gen_s         = (EVAL_TOKENS_GEN    / gen_tps)    if gen_tps    else 0.0
+        derived       = round(total_wall_s - prompt_eval_s - gen_s, 2)
+        # Sanity check: must be positive and less than total wall time
+        if 0 < derived < total_wall_s:
+            load_time_s = derived
+        else:
+            logger.warning(
+                f"load_time_s derivation out of range "
+                f"(wall={total_wall_s:.2f}s, prompt={prompt_eval_s:.2f}s, "
+                f"gen={gen_s:.2f}s, derived={derived:.2f}s)"
+            )
+    except Exception as e:
+        logger.warning(f"Could not derive load_time_s: {e}")
 
     return {
         "success": True,
