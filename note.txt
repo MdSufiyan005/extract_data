@@ -1,0 +1,13 @@
+---------------------ENV ---------------------------
+python -m venv venv
+source venv/bin/activate
+
+------------- Executing the Bash File --------------
+chmod +x setup.sh
+./setup.sh
+
+------------- Installing requirements --------------
+pip install -r requirements.txt
+
+-------------- Running Python File -----------------
+python Benchmark.py

@@ -1,0 +1,2 @@
+psutil
+llama-cpp-python
