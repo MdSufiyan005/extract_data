@@ -75,12 +75,6 @@ HF_NAMESPACE = "unsloth"
 
 # Local base/original models for KL divergence
 BASE_MODELS_DIR = Path("benchmark_data/models")
-BASE_MODEL_PATHS = {
-    "llama_1b": BASE_MODELS_DIR / "llama-3.2-1b-bf16.gguf",
-    "llama_3b": BASE_MODELS_DIR / "llama-3.2-3b-bf16.gguf",
-    "llama_8b": BASE_MODELS_DIR / "llama-3.1-8b-f16.gguf",
-    "qwen_2b": BASE_MODELS_DIR / "qwen3.5-2b-bf16.gguf"
-}
 
 MODELS = {
     "llama_1b": {
@@ -90,11 +84,11 @@ MODELS = {
         "params_b": 1.0,
     },
     "qwen_2b": {
-    "display_name": "Qwen3.5-2B",
-    "gguf_repo_name": "Qwen3.5-2B-GGUF",
-    "gguf_base_filename": "Qwen3.5-2B",
-    "params_b": 2.0,
-    },   
+        "display_name": "Qwen3.5-2B",
+        "gguf_repo_name": "Qwen3.5-2B-GGUF",
+        "gguf_base_filename": "Qwen3.5-2B",
+        "params_b": 2.0,
+    },
     "llama_3b": {
         "display_name": "Llama-3.2-3B",
         "gguf_repo_name": "Llama-3.2-3B-Instruct-GGUF",
@@ -103,24 +97,27 @@ MODELS = {
     },
     "gemma_4b": {
         "display_name": "Gemma-3-4B-Instruct",
-        "hf_repo":      "unsloth/gemma-3-4b-it-GGUF",
-        "hf_filename":  "gemma-3-4b-it-BF16.gguf",         
-        "local_name":   "gemma-3-4b-it-bf16.gguf",
-        "params_b":     4.0,
-    },    
+        "gguf_repo_name": "gemma-3-4b-it-GGUF",
+        "gguf_base_filename": "gemma-3-4b-it",
+        "params_b": 4.0,
+    },
     "llama_8b": {
         "display_name": "Llama-3.1-8B",
         "gguf_repo_name": "Llama-3.1-8B-Instruct-GGUF",
         "gguf_base_filename": "Llama-3.1-8B-Instruct",
         "params_b": 8.0,
     },
-    "ministral_8b": {  
+    "ministral_8b": {
         "display_name": "Ministral-3-8B-Instruct",
-        "hf_repo":      "unsloth/Ministral-3-8B-Instruct-2512-GGUF",
-        "hf_filename":  "Ministral-3-8B-Instruct-2512-BF16.gguf",
-        "local_name":   "ministral-3-8b-bf16.gguf",
-        "params_b":     8.0,
+        "gguf_repo_name": "Ministral-3-8B-Instruct-2512-GGUF",
+        "gguf_base_filename": "Ministral-3-8B-Instruct-2512",
+        "params_b": 8.0,
     },
+}
+
+BASE_MODEL_PATHS = {
+    model_key: BASE_MODELS_DIR / f"{cfg['gguf_base_filename']}-BF16.gguf"
+    for model_key, cfg in MODELS.items()
 }
 
 MODEL_METADATA = {
