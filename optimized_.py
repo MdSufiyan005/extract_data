@@ -1020,4 +1020,5 @@ if __name__ == "__main__":
     main()
 
 
-python benchmark_script.py --precompute-base --model llama_1b
+# python optimized_.py --precompute-base --model llama_1b
+# python optimized_.py --device rpi4 --resume
