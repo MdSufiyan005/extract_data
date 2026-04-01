@@ -235,13 +235,11 @@ CSV_COLUMNS = [
 # ══════════════════════════════════════════════════════════════════════════════
 # PRECOMPUTED BASE DISTRIBUTIONS (NEW - EDGE MEMORY SAFE)
 # ══════════════════════════════════════════════════════════════════════════════
-
 BASE_DISTS_DIR = Path("benchmark_data") / "base_dists"
 BASE_DISTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def save_base_distributions(model_key: str, dists: dict) -> Path:
-    """Save base model top-probability distributions for each prompt"""
     dest = BASE_DISTS_DIR / f"{model_key}_ref_dists.json"
     data = {
         "model_key": model_key,
@@ -253,12 +251,10 @@ def save_base_distributions(model_key: str, dists: dict) -> Path:
     }
     with open(dest, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
-    logger.info(f"✅ Saved base reference distributions → {dest}")
+    logger.info(f"✅ SAVED: {dest.name} ({len(dists)} prompts)")
     return dest
 
-
 def load_base_distributions(model_key: str) -> Optional[dict]:
-    """Load precomputed base distributions. Returns {prompt: dist_dict} or None"""
     dest = BASE_DISTS_DIR / f"{model_key}_ref_dists.json"
     if not dest.exists():
         return None
@@ -271,37 +267,39 @@ def load_base_distributions(model_key: str) -> Optional[dict]:
         logger.warning(f"Failed to load base dists {model_key}: {e}")
         return None
 
-
 def precompute_base_dists_for_model(model_key: str, device_key: str) -> bool:
-    """Run ONCE on a capable machine (PC/laptop). Saves reference distributions."""
     base_path = get_base_model_path(model_key)
     if not base_path or not base_path.exists():
         logger.error(f"❌ Base BF16 model not found: {base_path}")
         return False
 
-    logger.info(f"🔄 Precomputing reference distributions for {model_key} ({base_path.name})")
+    logger.info(f"🔄 Precomputing for {model_key} → {base_path.name}")
 
     try:
         base_llm = load_llm_for_kl(base_path, device_key)
         dists = {}
+        success_count = 0
 
         for idx, prompt in enumerate(KL_PROMPTS, start=1):
             try:
                 dist = _extract_top_probs(base_llm, prompt)
                 dists[prompt] = dist
-                logger.info(f"   [{idx}/{len(KL_PROMPTS)}] ✓ {len(dist)} tokens")
+                success_count += 1
+                logger.info(f"   [{idx}/8] ✓ {len(dist)} tokens extracted")
             except Exception as e:
-                logger.warning(f"   Prompt {idx} failed: {e}")
+                logger.warning(f"   [{idx}/8] ✗ Prompt failed: {e}")
+
+        logger.info(f"   → Successfully extracted {success_count}/8 prompts")
 
         if not dists:
-            logger.error("No distributions computed")
+            logger.error("❌ No distributions computed at all → nothing to save")
             return False
 
         save_base_distributions(model_key, dists)
         return True
 
     except Exception as e:
-        logger.error(f"Precompute failed: {e}")
+        logger.error(f"Precompute crashed: {e}")
         return False
     finally:
         try:
@@ -309,7 +307,6 @@ def precompute_base_dists_for_model(model_key: str, device_key: str) -> bool:
             gc.collect()
         except Exception:
             pass
-
 
 def _measure_kl_with_precomputed(
     candidate_model: Path, base_dists: dict, device_key: str
@@ -505,40 +502,45 @@ def _extract_top_probs(llm: Llama, prompt: str, top_k: int = KL_TOP_K) -> Dict[s
         echo=True,
     )
 
-    choices = out.get("choices") or []
-    if not choices:
-        raise RuntimeError("No choices returned by llama.cpp")
+    try:
+        choices = out.get("choices") or []
+        if not choices:
+            raise RuntimeError("No choices in response")
 
-    choice0 = choices[0]
-    logprobs = choice0.get("logprobs") or {}
-    top_logprobs = logprobs.get("top_logprobs")
+        logprobs = choices[0].get("logprobs") or {}
+        top_logprobs_list = logprobs.get("top_logprobs")
 
-    if not isinstance(top_logprobs, list) or not top_logprobs:
-        raise RuntimeError(f"No top_logprobs list found. keys={list(logprobs.keys())}")
+        if not isinstance(top_logprobs_list, list) or not top_logprobs_list:
+            raise RuntimeError(f"top_logprobs is empty or wrong type. Keys: {list(logprobs.keys())}")
 
-    top_logprob_dict = next(
-        (d for d in reversed(top_logprobs) if isinstance(d, dict) and d),
-        None,
-    )
+        # Take the LAST non-None dictionary (the generated token)
+        top_logprob_dict = None
+        for entry in reversed(top_logprobs_list):
+            if isinstance(entry, dict) and entry:
+                top_logprob_dict = entry
+                break
 
-    if top_logprob_dict is None:
-        raise RuntimeError(f"No usable top_logprobs found.")
+        if top_logprob_dict is None:
+            raise RuntimeError("Could not find any valid logprob dictionary")
 
-    probs = {}
-    for token, logprob in top_logprob_dict.items():
-        if logprob is None:
-            continue
-        try:
-            probs[str(token)] = math.exp(float(logprob))
-        except (TypeError, ValueError):
-            continue
+        probs = {}
+        for token, logprob in top_logprob_dict.items():
+            if logprob is None:
+                continue
+            try:
+                probs[str(token)] = math.exp(float(logprob))
+            except Exception:
+                continue
 
-    total = sum(probs.values())
-    if total <= 0:
-        raise RuntimeError("Parsed probabilities sum to zero")
+        total = sum(probs.values())
+        if total <= 0:
+            raise RuntimeError("Probability sum is zero")
 
-    return {k: v / total for k, v in probs.items()}
+        return {k: v / total for k, v in probs.items()}
 
+    except Exception as e:
+        logger.debug(f"Raw output keys: {list(out.keys()) if isinstance(out, dict) else type(out)}")
+        raise RuntimeError(f"Failed to parse logprobs: {e}") from e
 
 def _smooth_and_normalize(dist: dict[str, float], support: list[str], eps: float = KL_EPS) -> dict[str, float]:
     other_key = "__OTHER__"
@@ -1016,3 +1018,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+python benchmark_script.py --precompute-base --model llama_1b
